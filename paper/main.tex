@@ -1,0 +1,1002 @@
+\documentclass[10pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,booktabs,graphicx,microtype}
+\usepackage[authoryear,round]{natbib}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{siunitx}
+
+\title{Post-Selection Certification for Safe Context Selection under Downstream-Model Uncertainty}
+\author{Tao Ran\\Anhui University, Hefei, Anhui, China\\ORCID: 0009-0002-4449-8982\\Corresponding author: 2807215626@qq.com}
+\date{}
+
+\newcommand{\PSC}{\textsc{PSC-BS}}
+\newcommand{\eo}{\mathrm{EO}^2}
+\newcommand{\AUC}{\mathrm{AUC}}
+\newcommand{\LL}{\mathrm{LL}}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{lemma}[theorem]{Lemma}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Context selection can improve group fairness in in-context learning (ICL), but aggressive selection can create post-selection failure: a context that looks favorable under proxy learners may transfer poorly to an unavailable downstream model and cause severe utility loss.
+We study safe context selection under downstream-model uncertainty and introduce \PSC{} (Post-Selection Benefit-Safety Certification), a model-agnostic deployment wrapper.
+A proposal stage first commits to a candidate context and a deployable safety anchor without accessing an independent certification split.
+Only then is that split revealed.
+Three heterogeneous inexpensive certifiers compare candidate against anchor; the candidate is deployed only when every certifier satisfies frozen AUC and log-loss tolerances and the certifier ensemble shows average fairness benefit.
+Otherwise, \PSC{} falls back to the anchor.
+Independent sample splitting preserves fixed-pair deviation validity conditional on the prior search, yielding anchor-relative tolerance-plus-estimation-radius bounds for the certifier family.
+We then test transfer empirically on unseen learners.
+In frozen fresh confirmation across nine fairness tasks, five outer splits, four context budgets, four held-out classical learners, TabPFN-3.5, and TabICLv2, all preregistered CPU and GPU gates pass.
+On the two unseen tabular foundation models, \PSC{} reduces severe AUC-loss events from 7.78\% for the uncertified selected candidate to 0.28\%, while reducing mean smooth equalized-odds disparity relative to the safety anchor and preserving mean utility.
+Ablations identify the utility guard, heterogeneous certification, and fallback as the main downside-control mechanisms.
+One genuine unseen-model miss remains; the method controls rather than eliminates tail risk.
+\end{abstract}
+
+\noindent\textbf{Keywords:} in-context learning; post-selection certification; fairness; downstream-model uncertainty; tabular foundation models; selective deployment
+
+\section{Introduction}
+
+In-context learning makes the context set part of the prediction algorithm.
+For tabular foundation models, changing a few context rows can materially change both predictive utility and group fairness.
+Recent work has therefore explored fairness-aware demonstration selection for language models and tabular foundation models \citep{hu2024strategic,kenfack2026fairtabicl,chhikara2025smite}.
+A central difficulty remains underexplored: the learner used to score or validate a context during selection need not be the learner that ultimately consumes that context.
+
+This mismatch creates \emph{downstream-model uncertainty}.
+A selector may optimize a fairness proxy, a surrogate, or a validation learner and find a context that looks excellent on that proxy.
+Yet the selected context is a post-selection object: it was chosen precisely because it looked favorable under the selection machinery.
+When transferred to a different learner, especially a high-capacity tabular foundation model, the same context can exhibit a severe utility left tail.
+Our development experiments expose this failure mode directly: fairness-oriented surrogate optimization can increase fairness wins while producing large AUC losses.
+The problem is therefore not simply how to search for a fair context, but \emph{when a searched context is safe enough to deploy}.
+
+We propose \PSC{}, a deployment wrapper that separates proposal from certification.
+The proposal/search stage may be strong and even highly adaptive, but it must commit to one candidate $S^\star$ and one safety anchor $A$ before the certification split $W$ is revealed.
+On $W$, a heterogeneous certifier family estimates candidate-minus-anchor changes in AUC, log-loss, and a smooth equalized-odds score.
+The candidate is deployed only if it satisfies frozen utility tolerances for every certifier and shows average fairness benefit; otherwise deployment falls back to $A$.
+The final downstream learner is not used in certification.
+This distinguishes the setting from recent safe-ICL risk-control methods that calibrate an inference-time policy for the same known LLM relative to its zero-shot behavior; our object is a pre-deployment context decision whose transfer to an unavailable learner must be tested separately \citep{wynn2026corrupted}.
+
+Our contributions are:
+\begin{enumerate}[leftmargin=*]
+    \item We formulate context selection under \emph{downstream-model uncertainty}, separating the upstream search problem from the downstream deployment-safety problem.
+    \item We introduce independent post-selection benefit-safety certification with an anchor fallback, yielding a selective deployment rule rather than another context-scoring objective.
+    \item We give a finite-sample framework showing why an independent certification split restores fixed-pair validity after arbitrary search on earlier data and how anchor-relative utility tolerances translate into population bounds up to estimation error.
+    \item We pre-specify and cryptographically freeze the method before fresh CPU confirmation, then freeze the sequential GPU protocol before inspecting foundation-model outcomes. We evaluate on nine fairness tasks, four held-out classical learners, TabPFN-3.5, and TabICLv2; both stages pass all frozen gates.
+    \item We audit tail risk rather than only averages: on unseen tabular foundation models, severe AUC losses relative to the anchor fall from 7.78\% for the raw selected candidate to 0.28\% after \PSC{}, with one genuine certification miss explicitly retained.
+\end{enumerate}
+
+\section{Related Work}
+
+\paragraph{Fairness-aware context selection.}
+Hu et al. study strategic demonstration selection for fairness in LLM ICL and use clustering and evolutionary search to curate demonstrations \citep{hu2024strategic}.
+Fair-TabICL, now published in TMLR, evaluates fairness interventions for tabular foundation-model ICL, including group-balanced and uncertainty-based demonstration selection \citep{kenfack2026fairtabicl}.
+SMITE jointly targets predictive and fairness errors through dynamic validation during in-context example selection \citep{chhikara2025smite}.
+FairPFN takes a different route and trains a dedicated tabular foundation model for causal fairness \citep{robertson2025fairpfn}.
+These works establish that context composition and tabular foundation models can be used as fairness interventions.
+We do not claim first fairness-aware ICL selection or first fairness work for tabular foundation models.
+Our question is downstream: once a fairness-oriented search procedure has selected a context, when is that post-selection context safe enough to deploy under a learner that was unavailable to the selector?
+
+\paragraph{Demonstration validation and upstream selection.}
+D.Va explicitly introduces demonstration validation to improve robustness and cross-model generalization \citep{zhang2025dva}; consequently, we do not claim demonstration validation itself as novel.
+Coverage-based selection optimizes set-level coverage rather than independent example scores \citep{gupta2023coverage}, while recent approaches use gradient estimates or gradient matching to scale influence-based demonstration selection \citep{zzhang2025linear,jzhang2025gradient}.
+We view these methods as possible proposal mechanisms.
+\PSC{} is deliberately positioned \emph{after} proposal: it requires the upstream method to commit to one candidate and one fallback before the certification split is revealed.
+Relative to D.Va, the distinguishing design is anchor-relative benefit-and-utility certification with an operational fallback and explicit auditing of unseen-model utility tails.
+
+\paragraph{Post-selection inference and selective deployment.}
+Sample splitting is a classical response to inference after model or variable selection \citep{kuchibhotla2022postselection}, and adaptive-data-analysis work formalizes why repeatedly reusing holdout data can destroy validity \citep{dwork2015reusable}.
+Our independence theorem instantiates this familiar principle for context certification; the statistical fact of sample splitting is not the novelty claim.
+The fallback also resembles selective prediction and reject-option methods, which trade coverage for reliability \citep{geifman2017selective}.
+The object of rejection here is different: \PSC{} accepts or rejects an entire \emph{searched context} before an unseen downstream learner is run, rather than abstaining on individual test examples.
+
+\paragraph{Risk-controlled safe ICL.}
+A particularly close safety-oriented neighbor is Wynn et al., who use distribution-free risk control with dynamic early exit to limit degradation from corrupted or irrelevant context relative to a zero-shot baseline in language-model ICL \citep{wynn2026corrupted}.
+Their calibration is built around a \emph{known} downstream LLM and selects an inference-time exit threshold; if no exit is sufficiently confident, the same model falls back to zero-shot prediction.
+This work is important for our positioning because it shows that neither ``safe ICL,'' baseline-relative control, nor fallback is novel in isolation.
+\PSC{} addresses a different deployment object: it certifies an entire \emph{searched context} before an unavailable downstream learner is run, uses heterogeneous external certifiers rather than internal exits of the target model, jointly checks fairness benefit and utility safety, and falls back to a predeclared deployable context rather than to zero-shot behavior.
+Moreover, our frozen v2.7 rule is \emph{not} a Learn-then-Test risk-control procedure \citep{angelopoulos2025ltt}: its finite-sample theory is certifier-side fixed-pair concentration, while transfer to TabPFN-3.5 and TabICLv2 is empirical.
+We therefore do not claim first risk-controlled or safe ICL; the contribution is post-selection context certification under downstream-model uncertainty.
+
+\paragraph{Tabular foundation models.}
+TabPFN established prior-data fitted transformers as strong tabular predictors \citep{hollmann2025tabpfn}; our fresh confirmation uses the recently released TabPFN-3.5 checkpoint \citep{jaeger2026tabpfn35}.
+TabICL scales tabular ICL to larger context sets \citep{qu2025tabicl}; our second unseen foundation-model confirmation uses TabICLv2 \citep{qu2026tabiclv2}.
+Neither TabPFN-3.5 nor TabICLv2 participates in \PSC{} search or certification.
+
+\section{Problem Formulation}
+
+Let a binary classification dataset consist of $(x_i,y_i,g_i)$, where $y_i\in\{0,1\}$ is the target and $g_i\in\{0,1\}$ is a protected-group indicator.
+We split the available data into a context pool $P$, optional proposal calibration data $C$, a search/validation split $V$, an independent certification split $W$, and an untouched test split $T$.
+
+Let $S\subseteq P$ denote a context of fixed budget $k$.
+A proposal procedure $\mathcal A$ commits to one candidate
+\begin{equation}
+S^\star=\mathcal A(P,C,V),
+\end{equation}
+while an anchor procedure $\mathcal B$ commits to
+\begin{equation}
+A=\mathcal B(P,C,V).
+\end{equation}
+The downstream learner used on $T$ is not assumed known to $\mathcal A$, $\mathcal B$, or the certification procedure.
+
+For predicted positive-class probabilities $p(x)$, we use a smooth score-based equalized-odds surrogate
+\begin{equation}
+\mathrm{EO}^2(p)
+=
+\sum_{y\in\{0,1\}}
+\left[
+\mathbb E[p(X)\mid Y=y,G=0]-
+\mathbb E[p(X)\mid Y=y,G=1]
+\right]^2.
+\label{eq:smooth-eo}
+\end{equation}
+This is a smooth surrogate motivated by equalized-odds comparisons \citep{hardt2016equality}; it is not a claim that thresholded equalized odds holds at every operating point.
+Smaller values indicate lower conditional score disparity.
+For any metric $M$, candidate-minus-anchor differences are
+\begin{equation}
+\Delta M = M(S^\star)-M(A).
+\end{equation}
+Thus $\Delta \mathrm{EO}^2<0$ denotes a fairness improvement under the chosen surrogate, $\Delta\AUC>0$ denotes an AUC improvement, and $\Delta\LL<0$ denotes a log-loss improvement.
+
+\section{\PSC{}: Post-Selection Benefit-Safety Certification}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig_psc_bs_pipeline.png}
+    \caption{\PSC{} separates proposal/search from independent post-selection certification. The candidate and safety anchor are fixed before $W$ is revealed. Rejection falls back exactly to the anchor; the unseen downstream learner is evaluated only on $T$.}
+    \label{fig:pipeline}
+\end{figure}
+
+\subsection{Generic rule}
+
+Let $g_1,\dots,g_K$ be inexpensive heterogeneous certifiers.
+For each $g_j$, train one instance on $S^\star$ and one on $A$, then evaluate both on the same independent $W$.
+Define
+\begin{equation}
+\Delta^{(j)}_{\AUC}, \qquad
+\Delta^{(j)}_{\LL}, \qquad
+\Delta^{(j)}_{\eo}.
+\end{equation}
+
+The frozen v2.7 utility certificate is
+\begin{equation}
+\min_j \Delta^{(j)}_{\AUC}\ge -0.01,
+\qquad
+\max_j \Delta^{(j)}_{\LL}\le 0.05,
+\label{eq:utilitygate}
+\end{equation}
+and the benefit certificate is
+\begin{equation}
+\frac{1}{K}\sum_{j=1}^K \Delta^{(j)}_{\eo}<0.
+\label{eq:benefitgate}
+\end{equation}
+Let $Z$ indicate that all conditions in Eqs.~\eqref{eq:utilitygate}--\eqref{eq:benefitgate} hold.
+Deployment is
+\begin{equation}
+S_{\mathrm{deploy}}=
+\begin{cases}
+S^\star,&Z=1,\\
+A,&Z=0.
+\end{cases}
+\label{eq:fallback}
+\end{equation}
+
+The utility rule is deliberately conservative across certifiers; the fairness rule requires average benefit across certifiers.
+No downstream test model participates in this decision.
+
+\subsection{Frozen instantiation}
+
+The confirmatory implementation uses:
+\begin{itemize}[leftmargin=*]
+    \item candidate proposal: 16 prevalence-matched random contexts scored on $V$ by Logistic Regression and HistGradientBoosting; among validation-utility-feasible draws, choose the lowest mean smooth $\eo$;
+    \item safety anchor: five prevalence-matched random contexts, with one anchor chosen on $V$ by a frozen Logistic/HistGradientBoosting/Random-Forest verifier;
+    \item independent certifiers on $W$: Logistic Regression, HistGradientBoosting, and Random Forest;
+    \item AUC tolerance $0.01$, log-loss tolerance $0.05$, fairness margin $0$.
+\end{itemize}
+The entire rule was frozen before the fresh v2.7 confirmation.
+
+\section{Why Independence Matters}
+
+Let $D_0=(P,C,V)$ and let $U$ contain all random seeds or algorithmic randomness used before the certification outcomes are inspected.
+Define $\mathcal F_0=\sigma(D_0,U)$.
+The selected candidate $S^\star$, anchor $A$, and the fitted certifier predictors (which train only on these contexts) are measurable with respect to information independent of $W$.
+The certification sample satisfies
+\begin{equation}
+W\perp \mathcal F_0.
+\end{equation}
+This is a sample-splitting construction, not a new post-selection inference principle \citep{kuchibhotla2022postselection}.
+
+\paragraph{Theorem 1 (independent post-selection pair validity).}
+Suppose that for every fixed pair $(S,A)$, an estimator $\widehat R_W(S,A)$ obeys
+\begin{equation}
+\Pr\!\left(
+\left|\widehat R_W(S,A)-R(S,A)\right|>\varepsilon_R(\delta)
+\right)\le \delta.
+\label{eq:fixedpair}
+\end{equation}
+If $(S^\star,A)$ is fixed before $W$ is inspected, then
+\begin{equation}
+\Pr\!\left(
+\left|\widehat R_W(S^\star,A)-R(S^\star,A)\right|>\varepsilon_R(\delta)
+\mid \mathcal F_0
+\right)\le \delta
+\end{equation}
+almost surely, and therefore the same bound holds unconditionally.
+
+\paragraph{Proof.}
+Condition on any realization of $\mathcal F_0$.
+The random selected pair becomes a fixed pair $(s,a)$.
+By independence, conditioning on $\mathcal F_0$ does not change the law of $W$.
+Equation~\eqref{eq:fixedpair} therefore applies to $(s,a)$ with conditional failure probability at most $\delta$.
+Taking expectation over $\mathcal F_0$ gives the unconditional statement. $\square$
+
+\paragraph{Why search on $W$ is different.}
+If $M$ candidate contexts are scored and one is selected using the same $W$, validity generally requires simultaneous rather than fixed-pair control.
+For a bounded empirical-mean statistic, a union bound with Hoeffding's inequality gives
+\begin{equation}
+\Pr\!\left(
+\sup_{S\in\mathcal C}|\widehat R_W(S)-R(S)|>\epsilon
+\right)
+\le 2M e^{-2n_W\epsilon^2},
+\end{equation}
+so a representative radius scales as
+\begin{equation}
+\epsilon=\sqrt{\frac{\log(2M/\delta)}{2n_W}}.
+\end{equation}
+\PSC{} does not pay this \emph{search-over-$W$} factor for the committed pair because proposal occurs on earlier data.
+This argument does not prevent adaptive analysis of other holdouts in general; it only describes the frozen one-shot certification protocol used here \citep{dwork2015reusable}.
+
+\subsection{Anchor-relative utility bounds}
+
+Let $R$ be a risk where smaller is better and define $\Delta_R=R(S^\star)-R(A)$.
+If
+\begin{equation}
+|\widehat\Delta_R-\Delta_R|\le \epsilon_R
+\end{equation}
+with probability at least $1-\delta$, then acceptance under $\widehat\Delta_R\le \tau$ implies
+\begin{equation}
+\Delta_R\le \tau+\epsilon_R.
+\label{eq:riskcor}
+\end{equation}
+For AUC, acceptance under $\widehat\Delta_{\AUC}\ge-\tau_{\AUC}$ analogously implies
+\begin{equation}
+\Delta_{\AUC}\ge-\tau_{\AUC}-\epsilon_{\AUC}.
+\label{eq:auccor}
+\end{equation}
+The frozen v2.7 gate uses point tolerances without an extra statistical margin.
+Equations~\eqref{eq:riskcor}--\eqref{eq:auccor} therefore justify a \emph{tolerance plus estimation radius} interpretation; they do not retroactively turn the empirical 0.01/0.05 tolerances into exact population guarantees.
+
+\subsection{Metric-specific deviation control}
+
+The three certified metrics require different arguments.
+For log-loss, predictions are clipped to $[\eta,1-\eta]$ with $\eta=10^{-8}$, so per-example log-loss lies in $[0,B]$ where $B=-\log\eta$.
+The paired candidate-minus-anchor log-loss contribution therefore lies in $[-B,B]$, and Hoeffding gives the valid fixed-pair radius
+\begin{equation}
+\epsilon_{\LL}(\delta)=B\sqrt{\frac{2\log(2/\delta)}{n_W}}.
+\end{equation}
+
+Empirical AUC is a bounded two-sample U-statistic rather than an iid empirical mean.
+Accordingly, we rely on standard U-statistic concentration for each fixed predictor and combine candidate/anchor deviations by a union bound \citep{clemencon2008ranking}.
+We leave the radius as $\epsilon_{\AUC}(\delta;n_+,n_-)$ to avoid pretending that class imbalance has the same concentration behavior as a simple sample mean.
+
+For smooth $\eo$, let
+\begin{equation}
+d_y(f)=\mathbb E[f(X)\mid Y=y,G=0]-\mathbb E[f(X)\mid Y=y,G=1].
+\end{equation}
+Conditional on the four realized cell counts $n_{yg}$, Hoeffding controls each bounded score mean.
+If all eight candidate/anchor group-conditional means are simultaneously within radii $r_{yg}$ of their expectations, then $|a^2-b^2|\le2|a-b|$ for $a,b\in[-1,1]$ yields
+\begin{equation}
+|\widehat\Delta_{\eo}-\Delta_{\eo}|
+\le 4\sum_{y,g} r_{yg}.
+\label{eq:eobound}
+\end{equation}
+One valid choice is
+\begin{equation}
+r_{yg}=\sqrt{\frac{\log(16/\delta)}{2n_{yg}}}.
+\end{equation}
+The bound is intentionally conservative; its role is to make the finite-sample logic explicit, not to claim that the deployed point gate is a tight confidence procedure.
+
+For $K$ certifiers and multiple required metric events, simultaneous validity follows by allocating the desired failure probability across the relevant events with a union bound.
+The utility gate uses a worst-certifier intersection, whereas the fairness gate targets the average certifier $\Delta\eo$.
+
+\subsection{Fallback and downstream-model uncertainty}
+
+Let $L_h$ denote a bad deployment event for an unseen learner $h$ relative to the anchor, such as $\Delta_h\AUC<-0.05$.
+Because rejection deploys the anchor exactly,
+\begin{equation}
+\Pr(L_h\text{ under }\PSC{})
+=
+\Pr(Z=1)\Pr(L_h\mid Z=1).
+\label{eq:fallbackdecomp}
+\end{equation}
+This identity explains why coverage matters but does not prove that the certificate chooses the right contexts.
+We therefore test that mechanism empirically, including a matched-acceptance random-gate diagnostic.
+
+Most importantly, Theorem~1 and Eqs.~\eqref{eq:riskcor}--\eqref{eq:eobound} apply to the \emph{certifier family}.
+They do not prove that an unseen learner $h$ must behave identically.
+A transfer theorem would require an additional discrepancy assumption, for example
+\begin{equation}
+\Delta_h^U(S,A)
+\le
+\max_j \Delta_{g_j}^U(S,A)+\rho_h^U.
+\end{equation}
+We therefore separate claims cleanly: theory establishes independent post-selection validity for certified quantities; fresh held-out experiments test whether those certificates transfer to unseen learners.
+
+\section{Experimental Protocol}
+
+\subsection{Data}
+
+We use nine binary fairness tasks:
+seven 2023 ACS/Folktables tasks---Income, Employment, Public Coverage, Mobility, Travel Time, Health Insurance, and Income-to-Poverty Ratio---aggregated over Colorado, Michigan, Minnesota, New Jersey, and Oregon \citep{ding2021retiring};
+the LSAC longitudinal bar-passage data \citep{wightman1998lsac};
+and the UCI Diabetes 130-US Hospitals dataset \citep{clore2014diabetes,strack2014hba1c}.
+
+For the ACS tasks, the protected comparison is RAC1P restricted to White-alone and Black-alone records, with race excluded from features.
+For Law School, the target is first-try bar passage and the protected attribute is sex.
+For Diabetes, the target is readmission within 30 days and the protected comparison is Caucasian versus African-American race.
+Protected attributes are excluded from model inputs.
+
+\subsection{Splits and preprocessing}
+
+Each dataset uses five deterministic outer splits, stratified jointly by target and protected group.
+The split sizes are $|P|=3000$, $|C|=500$, $|V|=500$, $|W|=1000$, and $|T|=2000$ for every fresh task; all filtered datasets exceed the 7000-row cap.
+We evaluate context budgets $k\in\{32,64,128,256\}$.
+Numeric features are median-imputed and standardized; categorical features are one-hot encoded.
+The preprocessing transform is fit on $P$ only.
+
+\subsection{Downstream models and baselines}
+
+Fresh CPU confirmation uses four held-out model families not used in certification: ExtraTrees, XGBoost, LightGBM, and an MLP.
+Fresh GPU confirmation uses TabPFN-3.5 and TabICLv2.
+The eight deployed selectors evaluated on GPU are \PSC{}, the raw 16-draw selected candidate, the safety anchor, and five prevalence-random references.
+
+The primary comparison is \PSC{} versus the safety anchor.
+We additionally compare against the mean of the five prevalence-random contexts.
+A \emph{severe utility tail} is predefined as
+\begin{equation}
+\Delta\AUC < -0.05
+\end{equation}
+relative to the safety anchor.
+A random-baseline \emph{guarded win} requires improved smooth $\eo$, $\Delta\AUC\ge -0.01$, and $\Delta\LL\le 0.05$.
+
+\subsection{Freshness and statistics}
+
+The v2.7 method and CPU gates were pre-specified and frozen on 2026-09-27 before the fresh v2.7 CPU outcomes were inspected.
+The frozen implementation SHA256 is
+\begin{center}
+\footnotesize\texttt{f02ccffec4bd20225e261bd4a2b88c803ebfbf700e8f53d6b664e42f82dc307d}
+\end{center}
+Development used ACS-2022 AZ/GA/MA/NC/WA; fresh CPU uses ACS-2023 CO/MI/MN/NJ/OR together with Law School and Diabetes. The GPU protocol was frozen only after CPU confirmation passed, but before TabPFN-3.5 or TabICLv2 outcomes were inspected, and it replays exactly the CPU-selected contexts. Thus the study is a sequential confirmation rather than two statistically independent preregistrations. Neither foundation model participates in search or certification.
+
+We report paired effects, dataset/model/budget stratification, severe-tail rates, and bootstrap intervals.
+Dataset-cluster bootstrap resamples entire datasets to expose cross-dataset uncertainty.
+
+
+\paragraph{AI-assisted research workflow.}
+OpenAI ChatGPT was used during the research workflow for code drafting and debugging, experiment-orchestration assistance, result-audit support, literature triage, and manuscript drafting/editing.
+All experimental protocols, thresholds, method freezes, executed computations, source verification, interpretation, and final manuscript content were reviewed and approved by the human author(s), who take full responsibility for the work.
+No AI system is listed as an author.
+
+
+\section{Results}
+
+\subsection{Fresh confirmation}
+
+\begin{table}[t]
+\centering
+\caption{Fresh confirmatory results. Differences are \PSC{} minus the safety anchor unless noted. Lower $\Delta\eo$ and $\Delta\LL$ are better; higher $\Delta\AUC$ is better.}
+\label{tab:fresh}
+\begin{tabular}{lrr}
+\toprule
+ & Fresh CPU & Fresh GPU \\
+\midrule
+Tasks & 5760/5760 & 2880/2880 \\
+Errors & 0 & 0 \\
+Downstream models & 4 & 2 \\
+Paired model cells & 720 & 360 \\
+Acceptance & 16.11\% & 16.11\% \\
+Mean $\Delta\eo$ & -0.001200 & -0.000513 \\
+Mean $\Delta\AUC$ & +0.000780 & +0.001208 \\
+Mean $\Delta\LL$ & -0.003554 & -0.002410 \\
+Severe AUC tail & 0.417\% & 0.278\% \\
+Random5 fairness win & 64.44\% & 65.00\% \\
+Random5 guarded win & 52.36\% & 51.67\% \\
+Random5 mean $\Delta\AUC$ & +0.011063 & +0.010031 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All eight frozen CPU gates and all nine sequentially frozen GPU gates pass.
+On GPU, the primary fairness effect versus anchor is negative with a paired-cell 95\% bootstrap interval $[-8.37,-2.31]\times10^{-4}$ and a dataset-task-cluster interval $[-8.77,-2.02]\times10^{-4}$.
+The mean AUC change is slightly positive; its dataset-task-cluster interval crosses zero, so we interpret utility as approximately preserved rather than claiming a universal AUC gain.
+The random5 fairness/guarded gates pass on their pre-specified point estimates, but their dataset-task-cluster intervals cross the 60\%/50\% thresholds; we therefore treat random5 win rates as secondary rather than the strongest robustness claim.
+
+The scale of the fairness effect is easier to interpret in absolute terms.
+Across the GPU lattice, the safety anchor has mean smooth $\eo=0.005171$ and \PSC{} has $0.004658$, a 9.9\% reduction in the aggregate mean.
+Among the 58 accepted TFM model-cells, anchor smooth $\eo$ averages $0.006288$ versus $0.003105$ after deploying the certified candidate, a 50.6\% descriptive reduction; accepted cells also have mean $\Delta\AUC=+0.00750$ and $\Delta\LL=-0.01496$ on the untouched TFM test outcomes.
+These accepted-subset numbers are descriptive effects, not additional selection rules.
+
+\subsection{Tail-risk control on unseen tabular foundation models}
+
+The raw selected candidate has 28 severe AUC-tail cells out of 360 (7.778\%).
+After \PSC{} certification and fallback, only one severe-tail cell remains (0.278\%).
+The observed absolute risk reduction is 7.50 percentage points; the paired-cell bootstrap 95\% interval is [5.00, 10.28] points and the dataset-task-cluster interval is [5.28, 9.44] points.
+
+\begin{table}[t]
+\centering
+\caption{Fresh GPU effects by unseen downstream model. Candidate tail is the severe-tail rate before \PSC{} fallback.}
+\label{tab:tfm}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Model & $\Delta\eo$ & $\Delta\AUC$ & $\Delta\LL$ & \PSC{} tail & Candidate tail \\
+\midrule
+TabPFN-3.5 & -0.000363 & +0.001482 & -0.000456 & 0.000\% & 6.111\% \\
+TabICLv2 & -0.000663 & +0.000934 & -0.004363 & 0.556\% & 9.444\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both unseen models satisfy the frozen transfer gate: negative mean $\Delta\eo$ and mean $\Delta\AUC\ge-0.01$ relative to anchor.
+The single remaining miss occurs on Law School, outer split 4, context budget 32, under TabICLv2: $\Delta\AUC=-0.0661$, $\Delta\eo=+0.00945$, and $\Delta\LL=+0.0819$.
+This is a genuine accepted-candidate miss, not an implementation error.
+Accordingly, our claim is that \PSC{} substantially \emph{reduces} or \emph{controls} severe downside incidence; it does not eliminate it.
+
+\subsection{Mechanism ablations}
+
+\begin{table*}[t]
+\centering
+\caption{GPU ablations reconstructed from frozen certification metadata and already-computed fresh GPU candidate/anchor outcomes. These analyses are post-confirmatory mechanism diagnostics.}
+\label{tab:ablation}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Policy & Accept & $\Delta\eo$ & $\Delta\AUC$ & $\Delta\LL$ & Severe tail & Guarded win \\
+\midrule
+Full \PSC{} & 16.1\% & -0.000513 & +0.001208 & -0.002410 & 0.278\% & 51.67\% \\
+Uncertified candidate / no fallback & 100.0\% & -0.002451 & -0.004297 & -0.008518 & 7.778\% & 55.00\% \\
+Utility-only certificate & 31.7\% & -0.000426 & +0.003150 & -0.005188 & 0.278\% & 51.67\% \\
+Benefit-only certificate & 55.6\% & -0.002508 & -0.003313 & -0.005157 & 5.000\% & 57.22\% \\
+Single Logistic certifier & 31.7\% & -0.000765 & +0.001794 & -0.004286 & 1.389\% & 53.61\% \\
+Single HistGB certifier & 31.1\% & -0.001525 & +0.002203 & -0.004777 & 0.833\% & 55.56\% \\
+Single RandomForest certifier & 34.4\% & -0.001056 & +0.003062 & -0.004737 & 1.111\% & 53.61\% \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Removing certification/fallback restores the 7.778\% candidate tail.
+Keeping only the fairness-benefit gate leaves a 5.0\% tail, identifying the utility guard as the main safety component.
+Single-certifier variants leak more tail risk than the heterogeneous intersection.
+The utility-only rule matches the full method's observed tail rate but yields less aggregate fairness improvement, consistent with the fairness gate acting as benefit targeting rather than primary utility protection.
+
+A low acceptance rate mechanically reduces failures because rejected cells revert to the anchor.
+To test whether \emph{which} cells are accepted matters, we add an explicitly post-confirmatory matched-acceptance diagnostic.
+Across 100,000 random gates that each accept exactly 29 of the 180 context cells, the mean severe-tail rate is 1.254\%, compared with 0.278\% for \PSC{}; mean $\Delta\AUC$ is $-0.000694$ for the matched-random gate versus $+0.001208$ for \PSC{}.
+Only 8.6\% of matched-random draws have a tail count no larger than the observed \PSC{} count.
+Because this diagnostic was added after confirmation, we use it as mechanistic evidence, not as a confirmatory hypothesis test.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig_ablation_tail_rate.png}
+    \caption{Severe AUC-tail rate for post-confirmatory GPU ablations.}
+    \label{fig:ablation}
+\end{figure}
+
+\subsection{Sensitivity}
+
+Reducing the certification sample from 1000 to 250 examples preserves the qualitative behavior; at 125 examples acceptance becomes more conservative and fairness benefit weakens.
+Observed severe-tail incidence remains between 0 and 0.556\% over $n_W\in\{125,250,500,1000\}$.
+We retain the frozen $n_W=1000$ and do not retune to the post-hoc sensitivity result.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig_cert_size_tail.png}
+    \caption{Certification-sample-size sensitivity. The zero-tail point at $n_W=500$ is a finite-sample observation, not a basis for retuning.}
+    \label{fig:certsize}
+\end{figure}
+
+Candidate-count sensitivity regenerates deterministic prefixes of the same 16-draw proposal stream at $M\in\{1,2,4,8,16\}$ and reuses the unchanged certificate.
+The selected candidate changes materially with $M$ (only 6.67\% of $M=1$ selections equal the $M=16$ choice), yet severe-tail incidence stays below 0.6\% for every tested $M$ on the four held-out classical model families.
+There is no monotone performance trend with $M$; proposal count is a search-capacity parameter, whereas certification/fallback controls deployment risk.
+The frozen $M=16$ setting is retained.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig_candidate_count_tail.png}
+    \caption{Candidate-count sensitivity on held-out classical models.}
+    \label{fig:candidates}
+\end{figure}
+
+\section{Discussion}
+
+The experiments support a distinction between \emph{search quality} and \emph{deployment safety}.
+The raw fairness-oriented search finds contexts with stronger average fairness than the selective deployment rule, but it also exhibits a substantially larger unseen-model utility tail.
+\PSC{} is intentionally selective: 29/180 fresh context cells deploy the searched candidate and the remainder deploy the predeclared anchor.
+This behavior is analogous to a reject option at the context level rather than at the prediction level \citep{geifman2017selective}.
+The pre-specified CPU acceptance gate of 10--60\% rules out the trivial always-fallback policy.
+
+The matched-acceptance diagnostic suggests that selectivity alone does not explain the full result.
+Randomly accepting the same number of contexts produces an expected severe-tail rate roughly 4.5 times larger than \PSC{} and a negative mean AUC change.
+Nevertheless, because this analysis is post-confirmatory and the randomization tail probability is 0.086, we treat it as mechanism evidence rather than a new statistical claim.
+
+The heterogeneous certifier ensemble also has a concrete role.
+A single cheap model can miss failures that another model exposes; intersecting utility conditions across Logistic Regression, HistGradientBoosting, and Random Forest lowers the observed unseen-model tail relative to each single-certifier variant.
+This is empirical evidence for model diversity, not a theorem that the three certifiers span every future learner.
+
+Finally, the anchor is central and deliberately modest.
+Absolute thresholds would mix task difficulty with deployment policy.
+Anchor-relative certification instead asks whether the searched context is sufficiently safe and beneficial compared with a context that can actually be deployed when certification fails.
+The theory is therefore only as meaningful as the chosen anchor: we do not claim that the anchor is globally optimal or absolutely fair.
+
+\paragraph{Novelty boundary.}
+We do not claim first sample splitting, first post-selection validation, first demonstration validation, first reject option, first fairness-aware context selection, or first fairness-aware tabular foundation model.
+The contribution is their problem-specific combination and evidence: an unknown-downstream context-selection formulation, a committed candidate/anchor pair, independent benefit-and-utility certification, exact fallback, and explicit fresh measurement of unseen-model left-tail utility risk.
+
+\section{Limitations}
+
+Our evidence has several deliberate boundaries.
+First, theory establishes certifier-side post-selection validity, while transfer to unseen downstream learners remains empirical unless a learner-discrepancy assumption is added.
+Second, the frozen v2.7 gate uses point tolerances chosen during development (AUC 0.01, log-loss 0.05) without an additional confidence margin; they are operational thresholds rather than statistically optimal constants.
+Third, the method accepts only 16.11\% of fresh context cells, so it trades deployment coverage for reliability; other applications may require a different operating point, which should be chosen before confirmation rather than tuned on these outcomes.
+Fourth, the study considers binary protected-group comparisons and a smooth score-based $\eo$ surrogate; intersectional, multi-group, and threshold-specific fairness constraints remain open.
+Fifth, the data are U.S.-centric. Moreover, seven of the nine task labels share the same ACS-2023 source and five states; task-level dataset-cluster bootstrap therefore should not be interpreted as nine independent data-generating domains.
+Sixth, one genuine TabICLv2 certification miss remains.
+Seventh, candidate-count sensitivity on alternative candidates is evaluated with classical held-out learners rather than rerunning post-hoc foundation-model inference for every $M$.
+Eighth, the main fresh confirmation freezes one strong proposal selector; broader selector-swap confirmation would test wrapper generality but is not required for the frozen claim reported here.
+
+\section{Conclusion}
+
+We introduced \PSC{}, an independent post-selection benefit-safety certificate with a safety-anchor fallback for context selection under downstream-model uncertainty.
+The statistical ingredient of sample splitting is classical; the method contribution is an operational deployment wrapper that separates fairness-oriented context search from a later anchor-relative safety decision when the eventual learner is unavailable.
+Across frozen fresh CPU confirmation and a sequentially frozen TabPFN-3.5/TabICLv2 confirmation, the method passes all pre-specified gates.
+The strongest empirical result is tail-focused: severe AUC-loss incidence on the unseen foundation models falls from 7.78\% for the raw selected candidate to 0.28\% after certification and fallback.
+Ablations, matched-acceptance analysis, and sensitivity studies support the intended mechanism without changing the frozen v2.7 rule.
+The remaining miss and the theory's transfer boundary keep the scope explicit: \PSC{} controls downside risk; it does not promise universal safety or global optimality.
+
+\appendix
+\section{Closest-Neighbor Positioning}
+
+\begin{table*}[h]
+\centering
+\caption{Positioning against the closest risk-control neighbor. The distinction is not that PSC-BS uniquely uses a baseline or fallback; it is the post-selection, unknown-downstream setting and the jointly certified fairness/utility decision.}
+\label{tab:closest}
+\small
+\begin{tabular}{p{3.1cm}p{5.3cm}p{6.1cm}}
+\toprule
+ & Wynn et al. (ICML 2026) & PSC-BS (ours) \\
+\midrule
+Primary failure mode & Harmful/irrelevant user context degrades a known LLM & Fairness-oriented context search overfits proxies and transfers poorly to an unavailable learner \\
+Decision object & Inference-time early-exit threshold & Entire searched context $S^\star$ versus anchor $A$ \\
+Baseline/fallback & Same LLM in zero-shot mode & Predeclared deployable anchor context \\
+Calibration/certification & Distribution-free risk control / Learn-then-Test-style calibration & Independent post-selection fixed-pair certification with operational tolerances \\
+Models used for the decision & The known target LLM's internal exits & Logistic, HistGB, and Random Forest; target TFM excluded \\
+Quantities controlled & Loss relative to zero-shot & Worst-certifier AUC/log-loss safety plus mean smooth-EO$^2$ benefit \\
+Unknown downstream model & Not the central setting & Central setting; transfer is evaluated empirically \\
+Intervention after rejection & Ignore context / zero-shot prediction & Deploy anchor context \\
+Theory claim & Risk control for the calibrated known-model policy & Certifier-side post-selection validity; no theorem of unseen-model transfer \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+\section{Formal Post-Selection Guarantees}
+\label{app:formal}
+
+This appendix states the statistical claims used by \PSC{} in a form that separates what follows from sample splitting from what remains an empirical transfer question. None of the results below upgrades the frozen v2.7 rule into a distribution-free risk-control procedure: the deployed rule uses fixed operational tolerances and no additional confidence margin.
+
+\subsection{Setup}
+Let $D_0=(P,C,V)$ collect all data and randomness used before certification, and let $\mathcal F_0=\sigma(D_0)$. The proposal and anchor are measurable with respect to $\mathcal F_0$:
+\[
+S^\star=\mathcal A(D_0),\qquad A=\mathcal B(D_0).
+\]
+The certification sample $W=(Z_1,\ldots,Z_n)$ is independent of $\mathcal F_0$. For a fixed certifier $g$ and a fixed pair $(S,A)$, let $\Delta_q(g;S,A)$ denote a population candidate-minus-anchor contrast for quantity $q$, and let $\widehat\Delta_q(g;S,A;W)$ be its estimator on $W$.
+
+\begin{theorem}[Conditional fixed-pair validity]
+\label{thm:fixedpair}
+Assume that for every deterministic pair $(s,a)$ and every $\delta\in(0,1)$,
+\[
+\Pr\!\left(
+\left|\widehat\Delta_q(g;s,a;W)-\Delta_q(g;s,a)\right|>
+\varepsilon_q(\delta)
+\right)\le \delta.
+\]
+Then the adaptively selected pair $(S^\star,A)$ satisfies
+\[
+\Pr\!\left(
+\left|\widehat\Delta_q(g;S^\star,A;W)-\Delta_q(g;S^\star,A)\right|>
+\varepsilon_q(\delta)
+\mid \mathcal F_0
+\right)\le \delta
+\]
+almost surely, and therefore the same inequality holds unconditionally.
+\end{theorem}
+
+\begin{proof}
+Condition on $\mathcal F_0$. On every realized pre-certification history, $(S^\star,A)$ becomes one deterministic pair $(s,a)$. Independence implies that the conditional law of $W$ given $\mathcal F_0$ is the same law used by the fixed-pair deviation assumption. The assumed bound therefore applies conditionally. Taking expectations of the conditional failure probability over $\mathcal F_0$ gives the unconditional statement.
+\end{proof}
+
+\begin{corollary}[No search-size penalty from earlier data]
+\label{cor:searchsize}
+The deviation radius in Theorem~\ref{thm:fixedpair} need not contain the number $M$ of candidates searched on $V$, even if $M$ is large or the search on $V$ is adaptive, provided exactly one candidate and one anchor are committed before $W$ is inspected.
+\end{corollary}
+
+\begin{proof}
+Theorem~\ref{thm:fixedpair} conditions on the complete search history. After conditioning, only one fixed pair is evaluated on $W$. A union bound over the candidate family would be required only if $W$ itself were reused to compare or select among multiple candidates.
+\end{proof}
+
+\subsection{Anchor-relative one-sided guarantees}
+
+\begin{proposition}[Operational tolerance plus estimation radius]
+\label{prop:tolerance}
+Suppose an event $E$ satisfies
+\[
+E=\left\{ |\widehat\Delta_q-\Delta_q|\le \varepsilon_q\right\}.
+\]
+For a loss-like metric, acceptance under $\widehat\Delta_q\le \tau_q$ implies on $E$ that
+\[
+\Delta_q\le \tau_q+\varepsilon_q.
+\]
+For a utility-like metric such as AUC, acceptance under $\widehat\Delta_q\ge -\tau_q$ implies on $E$ that
+\[
+\Delta_q\ge -\tau_q-\varepsilon_q.
+\]
+\end{proposition}
+
+\begin{proof}
+Both statements follow directly from the triangle inequality. For the loss case, $\Delta_q\le \widehat\Delta_q+\varepsilon_q\le \tau_q+\varepsilon_q$. The AUC statement follows from $\Delta_q\ge \widehat\Delta_q-\varepsilon_q$.
+\end{proof}
+
+\begin{corollary}[Simultaneous utility bounds for heterogeneous certifiers]
+\label{cor:multi}
+Let $K$ certifiers be fixed before observing $W$. If AUC and log-loss deviation events for each certifier are each assigned failure probability at most $\delta/(2K)$, then with probability at least $1-\delta$, every certifier that passes the empirical frozen utility gates also satisfies
+\[
+\Delta^{(j)}_{\AUC}\ge -\tau_{\AUC}-\varepsilon_{\AUC,j},\qquad
+\Delta^{(j)}_{\LL}\le \tau_{\LL}+\varepsilon_{\LL,j}
+\]
+simultaneously for all $j=1,\ldots,K$.
+\end{corollary}
+
+\begin{proof}
+Apply Proposition~\ref{prop:tolerance} on the intersection of the $2K$ deviation events and use a union bound.
+\end{proof}
+
+\subsection{Metric-specific finite-sample radii}
+The following radii are intentionally conservative and are provided to make the assumptions behind the generic theory explicit. They are not inserted into the frozen v2.7 deployment rule.
+
+\begin{proposition}[Clipped log-loss]
+\label{prop:logloss}
+Assume class probabilities are clipped to $[\eta,1-\eta]$ with $0<\eta<1/2$, and define $B=\log(1/\eta)$. Conditional on $\mathcal F_0$, let $D_i$ be the candidate-minus-anchor per-example log-loss difference on certification point $Z_i$. Then $D_i\in[-B,B]$. If the certification observations are independent,
+\[
+\Pr\left(
+|\widehat\Delta_{\LL}-\Delta_{\LL}|>\epsilon
+\mid\mathcal F_0
+\right)
+\le 2\exp\left(-\frac{n\epsilon^2}{2B^2}\right).
+\]
+Thus one valid two-sided radius is
+\[
+\varepsilon_{\LL}(\delta)
+= B\sqrt{\frac{2\log(2/\delta)}{n}}.
+\]
+\end{proposition}
+
+\begin{proof}
+Clipping bounds each binary log loss between $0$ and $B$, hence the paired difference lies in an interval of width $2B$. Hoeffding's inequality applied to the empirical mean of $D_i$ yields the stated bound.
+\end{proof}
+
+\begin{proposition}[AUC via bounded differences]
+\label{prop:auc}
+Condition on the certification class counts $n_1$ and $n_0$ and on $\mathcal F_0$. Assume $n_1,n_0>0$. For a fixed candidate/anchor pair, empirical AUC is a two-sample U-statistic with a kernel in $[0,1]$. For the candidate-minus-anchor AUC difference,
+\[
+\Pr\left(
+|\widehat\Delta_{\AUC}-\Delta_{\AUC}|>\epsilon
+\mid \mathcal F_0,n_1,n_0
+\right)
+\le
+2\exp\left(
+-\frac{\epsilon^2}{2(1/n_1+1/n_0)}
+\right).
+\]
+A conservative radius is therefore
+\[
+\varepsilon_{\AUC}(\delta)
+=
+\sqrt{2\left(\frac1{n_1}+\frac1{n_0}\right)\log\frac{2}{\delta}}.
+\]
+\end{proposition}
+
+\begin{proof}
+Write the AUC-difference estimator as the average over all positive-negative pairs of the difference between two pairwise ranking kernels. Each pairwise difference lies in $[-1,1]$. Replacing one positive observation can change the average by at most $2/n_1$, and replacing one negative observation can change it by at most $2/n_0$. McDiarmid's bounded-differences inequality therefore gives
+\[
+2\exp\left(
+-\frac{2\epsilon^2}{n_1(2/n_1)^2+n_0(2/n_0)^2}
+\right),
+\]
+which simplifies to the displayed inequality. Under iid sampling within classes, the two-sample U-statistic is unbiased for the corresponding population AUC contrast. Related ranking/U-statistic concentration results are standard \citep{clemencon2008ranking}.
+\end{proof}
+
+\begin{proposition}[A conservative smooth-$\eo$ radius]
+\label{prop:eo}
+For context $c\in\{S^\star,A\}$, define
+\[
+\mu^c_{yg}=\mathbb E[p_c(X)\mid Y=y,G=g],
+\qquad y,g\in\{0,1\},
+\]
+where $p_c(X)\in[0,1]$. Let $n_{yg}$ be the certification count in each target-group cell and $n_{\min}=\min_{y,g}n_{yg}>0$. If all eight candidate/anchor conditional means are estimated from $W$, then with probability at least $1-\delta$,
+\[
+|\widehat\Delta_{\eo}-\Delta_{\eo}|
+\le
+16\sqrt{\frac{\log(16/\delta)}{2n_{\min}}}.
+\]
+The right-hand side may be truncated at the trivial range bound $2$.
+\end{proposition}
+
+\begin{proof}
+By Hoeffding and a union bound over the eight conditional means, with probability at least $1-\delta$ every mean has error at most
+\[
+\eta_0=\sqrt{\frac{\log(16/\delta)}{2n_{\min}}}.
+\]
+For a fixed context and target value $y$, the group-gap estimate differs from its population value by at most $2\eta_0$. Both gaps lie in $[-1,1]$, so $|\hat d_y^2-d_y^2|\le 2|\hat d_y-d_y|\le4\eta_0$. Summing over the two target values gives an $8\eta_0$ bound for one context's smooth-$\eo$ score. Taking a candidate-minus-anchor difference doubles this to $16\eta_0$.
+\end{proof}
+
+\subsection{Fallback and downstream transfer}
+
+\begin{proposition}[Exact fallback decomposition]
+\label{prop:fallback}
+Let $Z$ denote the event that \PSC{} accepts the candidate, and let $L$ be any adverse event defined relative to the anchor such that deploying the anchor itself cannot trigger $L$; for example, $L=\{\Delta_{\AUC}<-0.05\}$. Then
+\[
+\Pr(L\text{ under \PSC{}})
+=
+\Pr(Z=1,L\text{ for }S^\star)
+=
+\Pr(Z=1)\Pr(L\mid Z=1).
+\]
+\end{proposition}
+
+\begin{proof}
+When $Z=0$, \PSC{} deploys $A$ exactly, so every anchor-relative contrast equals zero and $L$ cannot occur. The event $L$ under the deployed policy is therefore identical to the intersection of acceptance and the candidate-level adverse event.
+\end{proof}
+
+Proposition~\ref{prop:fallback} explains why low acceptance mechanically reduces realized tail incidence. It does not show that the certificate identifies the right cells. The matched-acceptance diagnostic in the main text addresses that mechanism empirically by comparing \PSC{} with random gates having the same 29/180 acceptance count.
+
+\begin{proposition}[Transfer under a model-discrepancy envelope]
+\label{prop:transfer}
+Let $h$ be an unseen downstream learner and let $R$ be a loss-like utility metric. Suppose, for the accepted candidate/anchor pair, the downstream contrast obeys
+\[
+\Delta_R(h;S^\star,A)
+\le
+\max_{j\le K}\Delta_R(g_j;S^\star,A)+\rho_h.
+\]
+If all certifier-side bounds in Corollary~\ref{cor:multi} hold with common tolerance $\tau_R$ and radius at most $\varepsilon_R$, then acceptance implies
+\[
+\Delta_R(h;S^\star,A)
+\le \tau_R+\varepsilon_R+\rho_h.
+\]
+An analogous reversed inequality holds for AUC.
+\end{proposition}
+
+\begin{proof}
+Substitute the simultaneous certifier-side upper bound into the assumed discrepancy envelope.
+\end{proof}
+
+The discrepancy term $\rho_h$ is not known or calibrated in v2.7. Proposition~\ref{prop:transfer} is therefore a statement of what an additional transfer assumption would buy, not a claimed theorem for TabPFN-3.5 or TabICLv2. Their behavior is assessed only through untouched fresh experiments.
+
+
+\section{Dataset and Split Details}
+
+\begin{table*}[h]
+\centering
+\caption{Fresh-confirmation tasks after the frozen binary-group filters. All tasks use exact split sizes $3000/500/500/1000/2000$ for $P/C/V/W/T$. Feature counts are before one-hot expansion.}
+\label{tab:data}
+\small
+\begin{tabular}{lrrp{3.25cm}p{3.25cm}}
+\toprule
+Task & Rows & Features & Target & Protected comparison \\
+\midrule
+ACS Income & 148252 & 9 & official ACSIncome binary label & White vs Black (RAC1P) \\
+ACS Employment & 118051 & 15 & official ACSEmployment binary label & White vs Black (RAC1P) \\
+ACS Public Coverage & 64537 & 18 & official ACSPublicCoverage label & White vs Black (RAC1P) \\
+ACS Mobility & 45946 & 20 & official ACSMobility binary label & White vs Black (RAC1P) \\
+ACS Travel Time & 134774 & 15 & official ACSTravelTime label & White vs Black (RAC1P) \\
+ACS Health Insurance & 249131 & 25 & official ACSHealthInsurance label & White vs Black (RAC1P) \\
+ACS Income/Poverty & 225874 & 19 & official ratio-task binary label & White vs Black (RAC1P) \\
+Law School & 18690 & 10 & first-try bar passage & female vs male \\
+Diabetes Hospital & 95309 & 46 & readmission within 30 days & African-American vs Caucasian \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Protected attributes are removed from the model features in all tasks.
+The ACS tasks use 2023 one-year PUMS records from CO, MI, MN, NJ, and OR and self-contained Folktables-compatible task definitions.
+
+\section{GPU Stratification}
+
+\begin{table}[h]
+\centering
+\caption{Fresh GPU results by context budget.}
+\label{tab:budget}
+\small
+\begin{tabular}{rrrrrr}
+\toprule
+$k$ & Accept & $\Delta\eo$ & $\Delta\AUC$ & $\Delta\LL$ & Severe tail \\
+\midrule
+32 & 13.33\% & -0.000505 & +0.002934 & -0.007055 & 1.111\% \\
+64 & 13.33\% & -0.000774 & +0.001608 & -0.002344 & 0.000\% \\
+128 & 15.56\% & -0.000363 & -0.000158 & -0.000451 & 0.000\% \\
+256 & 22.22\% & -0.000409 & +0.000449 & +0.000211 & 0.000\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The weaker random5 win rates at $k=256$ are one reason we do not claim monotone improvement with context size.
+
+\section{Reproducibility Snapshot}
+
+The frozen method source has SHA256
+\begin{center}
+\footnotesize\texttt{f02ccffec4bd20225e261bd4a2b88c803ebfbf700e8f53d6b664e42f82dc307d}.
+\end{center}
+The fresh GPU run used \texttt{tabpfn==9.0.0}, \texttt{tabicl==2.2.0}, PyTorch 2.8.0+cu128, and an NVIDIA RTX 4090 D.
+The TabPFN-3.5 checkpoint SHA256 was
+\begin{center}
+\footnotesize\texttt{ece4d67eadfea42eb0e610df5189bea60cb7f31073d81e9c7a019b76eacf0be3},
+\end{center}
+and the TabICLv2 checkpoint SHA256 was
+\begin{center}
+\footnotesize\texttt{bdc7dbd5e4ff21f8f0456fcf90c6b7cdf72dbea960f2d05b19bec19f9b3d4ed0}.
+\end{center}
+The fresh GPU lattice completed 2880/2880 tasks with zero errors.
+
+
+\section*{Statements and Declarations}
+
+\paragraph{Funding.}
+FUNDING STATEMENT TO BE COMPLETED BEFORE SUBMISSION.
+
+\paragraph{Competing interests.}
+The authors declare no competing interests.
+
+\paragraph{Author contributions.}
+AUTHOR CONTRIBUTION STATEMENT TO BE COMPLETED BEFORE SUBMISSION.
+
+\paragraph{Data availability.}
+The study uses public benchmark datasets, including ACS/Folktables, LSAC, and the UCI Diabetes 130-US Hospitals dataset. Dataset provenance and preprocessing are described in the manuscript. The final reproducibility package will include frozen manifests, experiment configurations, context hashes, and analysis code; the public repository URL will be inserted before submission.
+
+\paragraph{Code availability.}
+The final code and reproducibility artifact will be released in a public repository. REPOSITORY URL TO BE INSERTED BEFORE SUBMISSION.
+
+\paragraph{Ethics approval.}
+This study performs secondary computational analysis of publicly available benchmark datasets and does not involve new recruitment, intervention, or collection of identifiable human-subject data. Any dataset-specific terms of use and provenance requirements remain applicable.
+
+
+\begin{thebibliography}{99}
+
+\bibitem[Hu et al.(2024)Hu, Liu, and Du]{hu2024strategic}
+Jingyu Hu, Weiru Liu, and Mengnan Du.
+\newblock Strategic Demonstration Selection for Improved Fairness in LLM In-Context Learning.
+\newblock In \emph{EMNLP}, pages 7460--7475, 2024.
+
+\bibitem[Kenfack et al.(2026)Kenfack, Ebrahimi Kahou, and Aivodji]{kenfack2026fairtabicl}
+Patrik Kenfack, Samira Ebrahimi Kahou, and Ulrich Aivodji.
+\newblock Towards Fair In-Context Learning with Tabular Foundation Models.
+\newblock \emph{Transactions on Machine Learning Research}, 2026.
+
+\bibitem[Chhikara et al.(2025)Chhikara, Ghosh, and Chakraborty]{chhikara2025smite}
+Garima Chhikara, Kripabandhu Ghosh, and Abhijnan Chakraborty.
+\newblock SMITE: Enhancing Fairness in LLMs through Optimal In-Context Example Selection via Dynamic Validation.
+\newblock arXiv:2508.17735, 2025.
+
+\bibitem[Zhang et al.(2025a)Zhang, Xiao, Xiao, Gao, and Zhao]{zhang2025dva}
+Qi Zhang, Zhiqing Xiao, Ruixuan Xiao, Lirong Gao, and Junbo Zhao.
+\newblock D.Va: Validate Your Demonstration First Before You Use It.
+\newblock In \emph{ACL}, pages 2580--2594, 2025.
+
+\bibitem[Gupta et al.(2023)Gupta, Gardner, and Singh]{gupta2023coverage}
+Shivanshu Gupta, Matt Gardner, and Sameer Singh.
+\newblock Coverage-based Example Selection for In-Context Learning.
+\newblock In \emph{Findings of EMNLP}, pages 13924--13950, 2023.
+
+\bibitem[Zhang et al.(2025b)Zhang, Zhang, Li, Wang, Dy, and Zhang]{zzhang2025linear}
+Ziniu Zhang, Zhenshuo Zhang, Dongyue Li, Lu Wang, Jennifer Dy, and Hongyang R. Zhang.
+\newblock Linear-Time Demonstration Selection for In-Context Learning via Gradient Estimation.
+\newblock In \emph{EMNLP}, pages 16459--16477, 2025.
+
+\bibitem[Zhang et al.(2025c)Zhang, Li, Bai, Li, Wang, Lin, and Rong]{jzhang2025gradient}
+Jianfei Zhang, Bei Li, Jun Bai, Rumei Li, Yanmeng Wang, Chenghua Lin, and Wenge Rong.
+\newblock Selecting Demonstrations for Many-Shot In-Context Learning via Gradient Matching.
+\newblock In \emph{Findings of ACL}, pages 11686--11704, 2025.
+
+\bibitem[Hollmann et al.(2025)Hollmann, M{\"u}ller, Purucker, Krishnakumar, K{\"o}rfer, Hoo, Schirrmeister, and Hutter]{hollmann2025tabpfn}
+Noah Hollmann, Samuel M{\"u}ller, Lennart Purucker, Arjun Krishnakumar, Max K{\"o}rfer, Shi Bin Hoo, Robin Tibor Schirrmeister, and Frank Hutter.
+\newblock Accurate predictions on small data with a tabular foundation model.
+\newblock \emph{Nature}, 637:319--326, 2025.
+
+\bibitem[J{\"a}ger et al.(2026)J{\"a}ger et al.]{jaeger2026tabpfn35}
+Benjamin J{\"a}ger et al.
+\newblock TabPFN-3.5: Technical Report.
+\newblock arXiv:2609.17895, 2026.
+
+\bibitem[Qu et al.(2025)Qu, Holzm{\"u}ller, Varoquaux, and Le Morvan]{qu2025tabicl}
+Jingang Qu, David Holzm{\"u}ller, Ga{\"e}l Varoquaux, and Marine Le Morvan.
+\newblock TabICL: A Tabular Foundation Model for In-Context Learning on Large Data.
+\newblock In \emph{ICML}, PMLR 267:50817--50847, 2025.
+
+\bibitem[Qu et al.(2026)Qu, Holzm{\"u}ller, Varoquaux, and Le Morvan]{qu2026tabiclv2}
+Jingang Qu, David Holzm{\"u}ller, Ga{\"e}l Varoquaux, and Marine Le Morvan.
+\newblock TabICLv2: A better, faster, scalable, and open tabular foundation model.
+\newblock arXiv:2602.11139, 2026.
+
+\bibitem[Ding et al.(2021)Ding, Hardt, Miller, and Schmidt]{ding2021retiring}
+Frances Ding, Moritz Hardt, John Miller, and Ludwig Schmidt.
+\newblock Retiring Adult: New Datasets for Fair Machine Learning.
+\newblock In \emph{NeurIPS}, volume 34, 2021.
+
+\bibitem[Wightman(1998)]{wightman1998lsac}
+Linda F. Wightman.
+\newblock LSAC National Longitudinal Bar Passage Study.
+\newblock LSAC Research Report Series, Law School Admission Council, 1998.
+
+\bibitem[Clore et al.(2014)Clore, Cios, DeShazo, and Strack]{clore2014diabetes}
+John Clore, Krzysztof Cios, Jonathan DeShazo, and Beata Strack.
+\newblock Diabetes 130-US Hospitals for Years 1999--2008.
+\newblock UCI Machine Learning Repository, 2014. DOI: 10.24432/C5230J.
+
+\bibitem[Strack et al.(2014)Strack et al.]{strack2014hba1c}
+Beata Strack et al.
+\newblock Impact of HbA1c Measurement on Hospital Readmission Rates: Analysis of 70,000 Clinical Database Patient Records.
+\newblock \emph{BioMed Research International}, 2014:781670, 2014.
+
+
+\bibitem[Robertson et al.(2025)Robertson, Hollmann, M{\"u}ller, Awad, and Hutter]{robertson2025fairpfn}
+Jake Robertson, Noah Hollmann, Samuel M{\"u}ller, Noor Awad, and Frank Hutter.
+\newblock FairPFN: A Tabular Foundation Model for Causal Fairness.
+\newblock In \emph{ICML}, PMLR 267:51787--51808, 2025.
+
+\bibitem[Kuchibhotla et al.(2022)Kuchibhotla, Kolassa, and Kuffner]{kuchibhotla2022postselection}
+Arun K. Kuchibhotla, John E. Kolassa, and Todd A. Kuffner.
+\newblock Post-Selection Inference.
+\newblock \emph{Annual Review of Statistics and Its Application}, 9:505--527, 2022.
+
+\bibitem[Dwork et al.(2015)Dwork et al.]{dwork2015reusable}
+Cynthia Dwork, Vitaly Feldman, Moritz Hardt, Toniann Pitassi, Omer Reingold, and Aaron Roth.
+\newblock The reusable holdout: Preserving validity in adaptive data analysis.
+\newblock \emph{Science}, 349(6248):636--638, 2015.
+
+\bibitem[Wynn et al.(2026)Wynn, Jazbec, Peris, Khaziev, Liu, Khashabi, and Nalisnick]{wynn2026corrupted}
+Andrea Wynn, Metod Jazbec, Charith Peris, Rinat Khaziev, Anqi Liu, Daniel Khashabi, and Eric Nalisnick.
+\newblock Controlling the Risk of Corrupted Contexts for Language Models via Early-Exiting.
+\newblock In \emph{ICML}, 2026. arXiv:2510.02480.
+
+\bibitem[Angelopoulos et al.(2025)Angelopoulos, Bates, Cand\`es, Jordan, and Lei]{angelopoulos2025ltt}
+Anastasios N. Angelopoulos, Stephen Bates, Emmanuel J. Cand\`es, Michael I. Jordan, and Lihua Lei.
+\newblock Learn then Test: Calibrating Predictive Algorithms to Achieve Risk Control.
+\newblock \emph{The Annals of Applied Statistics}, 2025.
+
+\bibitem[Geifman and El-Yaniv(2017)]{geifman2017selective}
+Yonatan Geifman and Ran El-Yaniv.
+\newblock Selective Classification for Deep Neural Networks.
+\newblock In \emph{NeurIPS}, volume 30, 2017.
+
+\bibitem[Hardt et al.(2016)Hardt, Price, and Srebro]{hardt2016equality}
+Moritz Hardt, Eric Price, and Nati Srebro.
+\newblock Equality of Opportunity in Supervised Learning.
+\newblock In \emph{NeurIPS}, volume 29, 2016.
+
+\bibitem[Hoeffding(1963)]{hoeffding1963probability}
+Wassily Hoeffding.
+\newblock Probability Inequalities for Sums of Bounded Random Variables.
+\newblock \emph{Journal of the American Statistical Association}, 58(301):13--30, 1963.
+
+\bibitem[Cl{\'e}men{\c c}on et al.(2008)Cl{\'e}men{\c c}on, Lugosi, and Vayatis]{clemencon2008ranking}
+St{\'e}phan Cl{\'e}men{\c c}on, G{\'a}bor Lugosi, and Nicolas Vayatis.
+\newblock Ranking and Empirical Minimization of U-Statistics.
+\newblock \emph{The Annals of Statistics}, 36(2):844--874, 2008.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,40 @@
+{
+  "version": "v2.7-psc-bs-frozen-20260927",
+  "name": "Post-Selection Benefit-Safety Certification (PSC-BS)",
+  "status": "FROZEN_BEFORE_FRESH_CONFIRMATION",
+  "split": {
+    "pool_P": 3000,
+    "proposal_calibration_C": 500,
+    "selection_V": 500,
+    "certification_W": 1000,
+    "test_T": 2000
+  },
+  "default_base_selector": "valfair_random_search16",
+  "safety_anchor": "best feasible of five prevalence-matched random contexts selected using V only; if none feasible, minimum violation then fairness",
+  "certifier_models": ["logistic", "histgb", "random_forest"],
+  "certificate": {
+    "all_model_delta_auc_min": -0.01,
+    "all_model_delta_logloss_max": 0.05,
+    "mean_delta_smooth_eo_sq": "< 0",
+    "fallback": "return safety anchor exactly"
+  },
+  "fresh_confirmation": {
+    "acs_year": 2023,
+    "acs_states": ["CO", "MI", "MN", "NJ", "OR"],
+    "acs_tasks": ["income", "employment", "public_coverage", "mobility", "travel_time", "health_insurance", "income_poverty"],
+    "additional_sources": ["law_school", "diabetes_hospital"],
+    "outer_splits": 5,
+    "context_budgets": [32, 64, 128, 256],
+    "heldout_cpu_models": ["extra_trees", "xgboost", "lightgbm", "mlp"]
+  },
+  "development_only_ablations": [
+    "point utility certificate without fairness-benefit gate",
+    "point utility + coverage gate",
+    "simultaneous bootstrap-LCB utility certificate",
+    "reuse V as certificate (leakage ablation)",
+    "single certifier",
+    "no fallback",
+    "v2.6 heterogeneous base selector",
+    "direct-surrogate base selector"
+  ]
+}

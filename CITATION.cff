@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: "PSC-BS: Post-Selection Certification for Safe Context Selection under Downstream-Model Uncertainty"
+message: "If you use this artifact, please cite the associated manuscript."
+type: software
+authors:
+  - family-names: Tao
+    given-names: Ran
+    orcid: "https://orcid.org/0009-0002-4449-8982"
+version: "1.0-artifact"
+date-released: "2026-09-29"

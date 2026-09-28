@@ -1,0 +1,21 @@
+{
+  "freeze_timestamp_label": "2026-09-27",
+  "method": "v2.7-psc-bs-frozen-20260927",
+  "files": [
+    {
+      "file": "FROZEN_V27_METHOD.json",
+      "sha256": "adad0829a6eb115400a9069abba74f1446653cee78b94e708cadffaee3d0f02e",
+      "bytes": 1556
+    },
+    {
+      "file": "V27_FREEZE_REPORT.md",
+      "sha256": "7ef38a2efcc02d248c291aad7d4ef106aa78266cfe656a2b3d3b332c6e096168",
+      "bytes": 4415
+    },
+    {
+      "file": "v27_psc_method.py",
+      "sha256": "f02ccffec4bd20225e261bd4a2b88c803ebfbf700e8f53d6b664e42f82dc307d",
+      "bytes": 4927
+    }
+  ]
+}

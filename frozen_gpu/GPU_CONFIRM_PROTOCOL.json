@@ -1,0 +1,62 @@
+{
+  "version": "v2.7-gpu-fresh-protocol-20260927",
+  "status": "FROZEN BEFORE FRESH GPU RESULTS",
+  "cpu_confirmation": {
+    "tasks": 5760,
+    "ok": 5760,
+    "error": 0,
+    "datasets": 9,
+    "all_8_gates_pass": true,
+    "acceptance_rate": 0.16111111111111112
+  },
+  "datasets": [
+    "acs23_income",
+    "acs23_employment",
+    "acs23_public_coverage",
+    "acs23_mobility",
+    "acs23_travel_time",
+    "acs23_health_insurance",
+    "acs23_income_poverty",
+    "law_school",
+    "diabetes_hospital"
+  ],
+  "outer_splits": 5,
+  "context_budgets": [
+    32,
+    64,
+    128,
+    256
+  ],
+  "gpu_models": [
+    "tabpfn35",
+    "tabiclv2"
+  ],
+  "selectors": [
+    "v27_psc_bs",
+    "valfair_random_search16",
+    "safety_anchor",
+    "prevalence_random_0",
+    "prevalence_random_1",
+    "prevalence_random_2",
+    "prevalence_random_3",
+    "prevalence_random_4"
+  ],
+  "expected_gpu_tasks": 2880,
+  "expected_paired_cells": 360,
+  "primary_comparison": "v27_psc_bs against safety_anchor and mean of five prevalence_random contexts",
+  "guarded_win_definition": "fairness improves AND delta AUC >= -0.01 AND delta logloss <= +0.05",
+  "catastrophic_utility_tail": "delta AUC relative to safety anchor < -0.05",
+  "gates": {
+    "1_complete_zero_error": "2880/2880 tasks OK, 0 errors, 360 paired cells",
+    "2_anchor_mean_fairness": "mean delta smooth-EO^2 vs safety anchor < 0",
+    "3_anchor_mean_auc": "mean delta AUC vs safety anchor >= -0.005",
+    "4_anchor_mean_logloss": "mean delta logloss vs safety anchor <= +0.01",
+    "5_anchor_tail": "P(delta AUC vs anchor < -0.05) <= 1%",
+    "6_vs_random5": "fairness win >=60%, guarded win >=50%, mean delta AUC >= -0.005",
+    "7_both_tfms_transfer": "for each of TabPFN3.5 and TabICLv2, mean delta smooth-EO^2 vs anchor <0 and mean delta AUC >= -0.01",
+    "8_not_single_dataset": "at least 5/9 datasets have negative mean delta smooth-EO^2 vs anchor",
+    "9_tail_vs_candidate": "PSC-BS catastrophic AUC-tail rate <= valfair_random_search16 candidate tail rate, both relative to same safety anchor"
+  },
+  "method_sha256": "f02ccffec4bd20225e261bd4a2b88c803ebfbf700e8f53d6b664e42f82dc307d",
+  "context_manifest_sha256": "326344bf7753a7d63cad77705c441d60b3c404093bc77e795064c1ddd0bbc8c6"
+}
