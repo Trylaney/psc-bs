@@ -3,7 +3,8 @@
 This repository is the reproducibility artifact for the manuscript **Post-Selection Certification for Safe Context Selection under Downstream-Model Uncertainty**.
 
 **Author:** Tao Ran, Anhui University  
-**ORCID:** 0009-0002-4449-8982
+**ORCID:** 0009-0002-4449-8982  
+**Repository:** https://github.com/Trylaney/psc-bs
 
 ## Frozen method
 
@@ -92,4 +93,4 @@ Ablations, candidate-count sensitivity, certification-size sensitivity, and the 
 
 ## License
 
-A software license has not yet been selected for public release. See `LICENSE_PENDING.md` before publishing the repository.
+Code and documentation in this artifact are released under the MIT License. See `LICENSE`.
